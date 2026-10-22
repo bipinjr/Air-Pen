@@ -30,11 +30,21 @@ The badge in the top-left corner always shows what the camera thinks your hand i
 
 You don't need to reach the edges of the camera view: its comfortable middle covers the whole screen.
 
+## Pen mode (write with a real pen)
+
+Press `P` (or the pen button) to track a pen with a **bright blue cap** instead of your finger. A coloured cap is a sharper target than a fingertip: in tests the pen point landed within 2 px of the cap.
+
+- **Writing:** `Shift` or the clicker turns writing on. While it's on, the pen writes whenever the cap is visible.
+- **Lift the pen between letters:** hide the cap (turn the pen or cover the cap with a finger), or press the clicker.
+- **Other colours:** press `L`, hold the cap inside the box on the camera view, and press Enter. Blue, green and pink caps work best; colours close to skin (red, orange, beige) track badly.
+- **What it ignores:** dark clothing, skin, and blue things that stay still (posters, stickers). Avoid wearing bright blue near the pen.
+- **Ink turns black in pen mode** (white on the black board) and blue UI highlights turn grey. When you project, the camera sees the screen, so nothing on it may look like the pen.
+
 ## Writing on a projector
 
 1. Point the webcam at the projected screen, so it sees the whole picture.
 2. Press `K` (or the calibrate button). A ring appears in each corner, one at a time.
-3. Touch each ring on the wall with your index fingertip and hold still for about a second.
+3. Touch each ring on the wall with your index fingertip (or the pen cap in pen mode) and hold still for about a second.
 
 The ink now lands right under your finger, even with the camera at an angle or a keystoned projector. The calibration is remembered. Press `K` to redo it, or `Esc` to remove it and go back to the mirror view.
 
@@ -54,6 +64,8 @@ The ink now lands right under your finger, even with the camera at an angle or a
 | `H` | Hide everything except the ink, for a clean board |
 | `D` | Diagnostics: hand-model speed, lost-hand count, line breaks by cause |
 | `V` | Big live camera view with your tracked hand drawn on it |
+| `P` | Pen mode on / off (track a blue pen cap instead of your finger) |
+| `L` | Teach a different pen colour |
 
 ## Steady writing
 

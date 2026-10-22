@@ -30,6 +30,10 @@
   color-scheme: dark;
 }
 
+/* pen mode: no blue on the board, so the camera can't mistake UI for a blue pen cap */
+.pen-mode { --accent: #1e2430; }
+[data-theme="dark"] .pen-mode { --accent: #eef1f6; }
+
 * { box-sizing: border-box; }
 
 html,
@@ -152,6 +156,8 @@ kbd {
 .badge[data-state="nohand"] .g-none,
 .badge[data-state="mouse"] .g-none,
 .badge[data-state="calib"] .g-write,
+.badge[data-state="pen-off"] .g-pen,
+.badge[data-state="pen-writing"] .g-pen,
 .badge[data-state="error"] .g-none {
   display: block;
 }
@@ -162,6 +168,8 @@ kbd {
 .badge[data-state="nohand"] .badge-glyph,
 .badge[data-state="error"] .badge-glyph { --signal: var(--warn); }
 .badge[data-state="calib"] .badge-glyph { --signal: var(--accent); }
+.badge[data-state="pen-off"] .badge-glyph { --signal: var(--ready); }
+.badge[data-state="pen-writing"] .badge-glyph { --signal: var(--accent); background: var(--accent); color: var(--board); }
 
 /* ---------- diagnostics ---------- */
 .diag {
@@ -317,6 +325,8 @@ kbd {
   transition: transform 0.15s;
 }
 
+.swatch.clash::before { opacity: 0.25; }
+
 .swatch[aria-checked="true"]::before {
   transform: scale(1.15);
   box-shadow: 0 0 0 2px var(--board), 0 0 0 4px var(--c);
@@ -386,6 +396,40 @@ kbd {
 }
 
 .calib-sub { color: var(--ink-soft); font-size: 1.05rem; }
+
+/* ---------- pen colour teaching ---------- */
+.teach {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.teach h2 { margin: 0; font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; }
+.teach p { margin: 8px 0 0; color: var(--ink-soft); line-height: 1.45; }
+.teach-actions { display: flex; gap: 8px; margin-top: 4px; }
+.teach-actions .go { flex: 1; }
+
+.ghost {
+  margin-top: 24px;
+  height: 52px;
+  padding: 0 18px;
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  background: transparent;
+  font-weight: 600;
+}
+
+.tip + .tip { margin-top: 8px; }
 
 /* ---------- welcome ---------- */
 .welcome {
