@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2716%27 fill=%27%231a4fd6%27/%3E%3Cpath d=%27M9 22c4-8 8-12 14-13%27 stroke=%27white%27 stroke-width=%273%27 fill=%27none%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 </head>
@@ -29,7 +30,10 @@
 
   <aside id="diag" class="diag ui hidden" aria-label="Diagnostics"></aside>
 
-  <video id="video" class="preview ui" autoplay playsinline muted></video>
+  <div id="cam" class="preview ui" title="Live camera (V for a big view)">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="skeleton"></canvas>
+  </div>
 
   <nav id="dock" class="dock ui" aria-label="Pen controls">
     <button id="btn-write" class="write-toggle" data-key="Shift" aria-pressed="false" title="Writing on/off (Shift or clicker)">

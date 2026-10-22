@@ -185,24 +185,35 @@ kbd {
 .diag dt { color: var(--ink-soft); }
 .diag dd { margin: 0; font-weight: 600; text-align: right; }
 
-/* ---------- camera preview ---------- */
+/* ---------- camera preview with live hand skeleton ---------- */
 .preview {
   position: fixed;
   top: 16px;
   right: 16px;
   z-index: 2;
-  width: 208px;
+  width: 220px;
   aspect-ratio: 16 / 9;
-  object-fit: cover;
+  overflow: hidden;
   border-radius: 14px;
   border: 1px solid var(--panel-line);
   box-shadow: var(--shadow);
   background: var(--panel);
-  opacity: 0.9;
+  transition: width 0.2s;
 }
 
+.preview.big { width: min(640px, 48vw); }
 .preview.mirror { transform: scaleX(-1); }
 .preview:not(.on) { display: none; }
+
+.preview video,
+.preview canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.preview video { object-fit: fill; opacity: 0.85; }
 
 /* ---------- dock ---------- */
 .dock {
@@ -478,7 +489,7 @@ kbd.big {
 /* ---------- small screens ---------- */
 @media (max-width: 760px) {
   .dock { flex-wrap: wrap; justify-content: center; bottom: 8px; }
-  .preview { display: none; }
+  .preview:not(.big) { display: none; }
   .write-toggle kbd { display: none; }
 }
 

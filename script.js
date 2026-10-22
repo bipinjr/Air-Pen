@@ -25,6 +25,10 @@ const MIN_STEP_PX = 2;              // smaller moves are ignored: removes micro-
 // Shake smaller than the string never moves the pen. Levels 1-5, change live with - and =.
 const STRING_LENGTHS = [0.006, 0.010, 0.015, 0.021, 0.028]; // fraction of screen width
 
+// Uncalibrated reach: this part of the camera view (mirrored) covers the whole screen, so you never
+// have to push your hand to the frame edge, where part of it leaves the picture and tracking fails.
+const REACH = { x0: 0.15, x1: 0.85, y0: 0.1, y1: 0.75 };
+
 // Projector calibration targets, screen-normalized
 const CAL_TARGETS = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
 const CAL_HOLD_MS = 1000;
@@ -57,6 +61,7 @@ let sizeSlot = 3; // 10px: readable from the back of a room
 // ======================= state =======================
 
 const video = document.getElementById('video');
+const camBox = document.getElementById('cam');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
@@ -78,6 +83,7 @@ const stats = { results: [], sendMs: 0, lostCount: 0, longestGapMs: 0, lostSince
 // ======================= smoothing =======================
 
 // One Euro filter: strong smoothing when the hand moves slowly, light when fast. https://gery.casiez.net/1euro/
+// minCutoff may be a function so the strength can change without a jump (light when pointing, strong when writing).
 function oneEuro(minCutoff, beta, dCutoff = 1.0) {
   let x = null, dx = 0, last = 0;
   const alpha = (cutoff, dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
@@ -87,15 +93,20 @@ function oneEuro(minCutoff, beta, dCutoff = 1.0) {
     last = now;
     const ad = alpha(dCutoff, dt);
     dx = ad * ((v - x) / dt) + (1 - ad) * dx;
-    const a = alpha(minCutoff + beta * Math.abs(dx), dt);
+    const mc = typeof minCutoff === 'function' ? minCutoff() : minCutoff;
+    const b = typeof beta === 'function' ? beta() : beta;
+    const a = alpha(mc + b * Math.abs(dx), dt);
     x = a * v + (1 - a) * x;
     return x;
   };
   f.reset = () => { x = null; dx = 0; };
   return f;
 }
-const filterX = oneEuro(0.25, 0.005);
-const filterY = oneEuro(0.25, 0.005);
+// Pointing: light smoothing, the cursor stays on your fingertip. Writing: strong smoothing for clean letters.
+const cutoff = () => (drawing ? 0.25 : 3.0);
+const speedBoost = () => (drawing ? 0.005 : 0.02); // how much fast moves loosen the smoothing
+const filterX = oneEuro(cutoff, speedBoost);
+const filterY = oneEuro(cutoff, speedBoost);
 
 // Final light smoothing of a finished stroke (ends stay put) so writing looks neat.
 function smoothStroke(stroke) {
@@ -156,7 +167,13 @@ function applyHomography(h, x, y) {
 
 // Camera fingertip -> screen point.
 function toScreen(tip) {
-  if (!homography) return { x: 1 - tip.x, y: tip.y }; // mirror view, like a selfie camera
+  if (!homography) { // mirror view, like a selfie camera, stretched from the comfortable middle of the frame
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    return {
+      x: clamp((1 - tip.x - REACH.x0) / (REACH.x1 - REACH.x0)),
+      y: clamp((tip.y - REACH.y0) / (REACH.y1 - REACH.y0))
+    };
+  }
   const [x, y] = applyHomography(homography, tip.x, tip.y);
   return { x, y };
 }
@@ -179,7 +196,7 @@ function stopCalibration() {
 function setHomography(h) {
   homography = h;
   prefs.set('homography', h);
-  video.classList.toggle('mirror', !h);
+  camBox.classList.toggle('mirror', !h);
 }
 
 function updateCalibText(handSeen) {
@@ -273,6 +290,7 @@ function onResults(results) {
   updateDiag();
 
   if (!found) {
+    drawSkeleton(null);
     target = null;
     if (calib) calibrationStep(null, t);
     else updateStatus(false);
@@ -293,6 +311,7 @@ function onResults(results) {
   if (calib) { target = null; calibrationStep(lastTip, t); return; }
   updatePen(hands[0]);
   updateStatus(true);
+  drawSkeleton(hands[0]);
   target = toScreen(lastTip); // index fingertip only
 }
 
@@ -318,7 +337,7 @@ function track(el) {
     try {
       if (el.readyState >= 2 || el.naturalWidth) {
         const w = el.videoWidth || el.naturalWidth, h = el.videoHeight || el.naturalHeight;
-        if (w && h) camAspect = w / h;
+        if (w && h && camAspect !== w / h) { camAspect = w / h; camBox.style.aspectRatio = `${w} / ${h}`; }
         const t0 = performance.now();
         await hands.send({ image: el });
         stats.sendMs = stats.sendMs * 0.9 + (performance.now() - t0) * 0.1;
@@ -336,6 +355,32 @@ function track(el) {
   // Watchdog: frame callbacks need the page to repaint. Chrome on Windows can wrongly treat a
   // fullscreen window on a second monitor (the projector) as covered and stop repainting it.
   setInterval(() => { if (performance.now() - lastSendAt > 150) send(); }, 50);
+}
+
+// ======================= live hand skeleton (camera preview) =======================
+
+const BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
+const skel = document.getElementById('skeleton');
+const skelCtx = skel.getContext('2d');
+
+function drawSkeleton(lm) {
+  const w = skel.clientWidth, h = skel.clientHeight;
+  if (!w) return; // preview hidden
+  if (skel.width !== w * devicePixelRatio) { skel.width = w * devicePixelRatio; skel.height = h * devicePixelRatio; }
+  const c = skelCtx, k = devicePixelRatio;
+  c.clearRect(0, 0, skel.width, skel.height);
+  if (!lm) return;
+  const color = penGesture && writingOn ? '#1a4fd6' : '#12a150';
+  c.lineWidth = 2.5 * k;
+  c.strokeStyle = color;
+  c.beginPath();
+  for (const [a, b] of BONES) { c.moveTo(lm[a].x * skel.width, lm[a].y * skel.height); c.lineTo(lm[b].x * skel.width, lm[b].y * skel.height); }
+  c.stroke();
+  c.fillStyle = '#ffffff';
+  for (const p of lm) { c.beginPath(); c.arc(p.x * skel.width, p.y * skel.height, 2.5 * k, 0, Math.PI * 2); c.fill(); }
+  c.fillStyle = color; // the pen point
+  c.beginPath(); c.arc(lm[8].x * skel.width, lm[8].y * skel.height, 6 * k, 0, Math.PI * 2); c.fill();
 }
 
 // ======================= drawing =======================
@@ -642,6 +687,7 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'h') document.body.classList.toggle('ui-off'); // clean board for the audience
   else if (key === 'd') { ui.diag.classList.toggle('hidden'); updateDiag(); }
   else if (key === 'k') startCalibration();
+  else if (key === 'v') camBox.classList.toggle('big'); // big live camera view with the tracked hand
   else if (key === 'escape') {
     if (calib) stopCalibration();
     else if (homography) { setHomography(null); toast('Calibration removed'); }
@@ -669,7 +715,7 @@ async function start() {
       const el = /\.(jpe?g|png|webp|gif)(\?|$)/i.test(src) ? new Image() : video;
       el.crossOrigin = 'anonymous';
       el.src = src;
-      if (el === video) { video.loop = true; await video.play(); video.classList.add('on'); }
+      if (el === video) { video.loop = true; await video.play(); camBox.classList.add('on'); }
       mode = 'camera';
       track(el);
       return;
@@ -679,7 +725,7 @@ async function start() {
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
     });
     await video.play();
-    video.classList.add('on');
+    camBox.classList.add('on');
     mode = 'camera';
     setStatus('loading', 'Starting', 'Loading the hand model');
     track(video);
@@ -690,7 +736,7 @@ async function start() {
 }
 
 document.documentElement.dataset.theme = themeName;
-video.classList.toggle('mirror', !homography);
+camBox.classList.toggle('mirror', !homography);
 resizeCanvas();
 syncDock();
 if (!prefs.get('welcomed', false)) showWelcome(true);

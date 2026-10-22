@@ -26,7 +26,9 @@ To deploy, host the folder on any static host (GitHub Pages, Netlify, Vercel). T
 | ☝ Only your index finger up | Write. The pen follows your index fingertip. |
 | ✌ Index and middle finger up (or open hand) | Lift the pen to move between letters |
 
-The badge in the top-left corner always shows what the camera thinks your hand is doing.
+The badge in the top-left corner always shows what the camera thinks your hand is doing. The camera preview (top-right) draws your tracked hand live; the big dot is the pen point.
+
+You don't need to reach the edges of the camera view: its comfortable middle covers the whole screen.
 
 ## Writing on a projector
 
@@ -51,6 +53,7 @@ The ink now lands right under your finger, even with the camera at an angle or a
 | `F` | Fullscreen |
 | `H` | Hide everything except the ink, for a clean board |
 | `D` | Diagnostics: hand-model speed, lost-hand count, line breaks by cause |
+| `V` | Big live camera view with your tracked hand drawn on it |
 
 ## Steady writing
 
