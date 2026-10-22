@@ -4,16 +4,99 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Air Pen</title>
-
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 </head>
 
 <body>
-  <video id="video" autoplay playsinline></video>
-  <canvas id="canvas"></canvas>
+  <canvas id="canvas" aria-label="Drawing board"></canvas>
+
+  <!-- live gesture badge: what the camera thinks your hand is doing -->
+  <header id="status" class="badge ui" role="status" aria-live="polite" data-state="loading">
+    <span class="badge-glyph" aria-hidden="true">
+      <svg class="g-write" viewBox="0 0 24 24"><path d="M9 21v-6.5L7.2 12.4a1.6 1.6 0 0 1 2.3-2.2L11 11.7V3.6a1.5 1.5 0 0 1 3 0V12M14 9.5a1.5 1.5 0 0 1 3 0V13M17 11a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-2"/></svg>
+      <svg class="g-pause" viewBox="0 0 24 24"><path d="M8 21v-5l-1.6-2.1a1.6 1.6 0 0 1 2.4-2.1L10 13V4.5a1.5 1.5 0 0 1 3 0V11l1.2-6.6a1.5 1.5 0 0 1 2.9.6L16 12v2a7 7 0 0 1-7 7"/></svg>
+      <svg class="g-none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M8 12h8"/></svg>
+    </span>
+    <span class="badge-text">
+      <strong id="status-title">Starting</strong>
+      <span id="status-detail">Loading the hand model</span>
+    </span>
+  </header>
+
+  <aside id="diag" class="diag ui hidden" aria-label="Diagnostics"></aside>
+
+  <video id="video" class="preview ui" autoplay playsinline muted></video>
+
+  <nav id="dock" class="dock ui" aria-label="Pen controls">
+    <button id="btn-write" class="write-toggle" data-key="Shift" aria-pressed="false" title="Writing on/off (Shift or clicker)">
+      <span class="write-led" aria-hidden="true"></span>
+      <span id="btn-write-label">Start writing</span>
+      <kbd>Shift</kbd>
+    </button>
+
+    <div class="dock-group" role="radiogroup" aria-label="Ink colour">
+      <button class="swatch" data-pen="0" role="radio" title="Ink 1 (key 1, C cycles)"></button>
+      <button class="swatch" data-pen="1" role="radio" title="Ink 2 (key 2)"></button>
+      <button class="swatch" data-pen="2" role="radio" title="Ink 3 (key 3)"></button>
+      <button class="swatch" data-pen="3" role="radio" title="Ink 4 (key 4)"></button>
+      <button class="swatch" data-pen="4" role="radio" title="Ink 5 (key 5)"></button>
+    </div>
+
+    <div class="dock-group stepper" aria-label="Pen size">
+      <button id="size-down" class="icon" title="Thinner pen ([)" aria-label="Thinner pen"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+      <span id="size-dot" class="size-dot" aria-live="polite"><i></i></span>
+      <button id="size-up" class="icon" title="Thicker pen (])" aria-label="Thicker pen"><svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg></button>
+    </div>
+
+    <div class="dock-group">
+      <button id="btn-undo" class="icon" title="Undo last stroke (Z)" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+      <button id="btn-clear" class="icon" title="Clear the board (Space)" aria-label="Clear board"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+      <button id="btn-save" class="icon" title="Save as image (S)" aria-label="Save as image"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></button>
+    </div>
+
+    <div class="dock-group">
+      <button id="btn-theme" class="icon" title="White / black board (T)" aria-label="Switch board colour"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg></button>
+      <button id="btn-calib" class="icon" title="Calibrate to projector (K)" aria-label="Calibrate to projector"><svg viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.5"/></svg></button>
+      <button id="btn-full" class="icon" title="Fullscreen (F)" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+      <button id="btn-help" class="icon" title="How it works" aria-label="How it works"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14M12 17.5v.01"/></svg></button>
+    </div>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- projector calibration -->
+  <div id="calib" class="calib hidden" role="dialog" aria-label="Projector calibration">
+    <p id="calib-text">Touch the ring with your fingertip and hold still</p>
+    <p class="calib-sub"><span id="calib-step">1</span> of 4 · <kbd>Esc</kbd> cancels</p>
+  </div>
+
+  <!-- first-run guide -->
+  <div id="welcome" class="welcome hidden" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div class="card">
+      <h1 id="welcome-title">Write in the air.</h1>
+      <p class="lede">Your index finger is the pen. The camera follows it, the board draws it.</p>
+      <ol class="moves">
+        <li>
+          <kbd class="big">Shift</kbd>
+          <div><strong>Turn writing on</strong><span>Shift, or Page Down on a clicker. Press again to stop.</span></div>
+        </li>
+        <li>
+          <svg class="move-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21v-6.5L7.2 12.4a1.6 1.6 0 0 1 2.3-2.2L11 11.7V3.6a1.5 1.5 0 0 1 3 0V12M14 9.5a1.5 1.5 0 0 1 3 0V13M17 11a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-2"/></svg>
+          <div><strong>One finger writes</strong><span>Point with just your index finger, other fingers curled.</span></div>
+        </li>
+        <li>
+          <svg class="move-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 21v-5l-1.6-2.1a1.6 1.6 0 0 1 2.4-2.1L10 13V4.5a1.5 1.5 0 0 1 3 0V11l1.2-6.6a1.5 1.5 0 0 1 2.9.6L16 12v2a7 7 0 0 1-7 7"/></svg>
+          <div><strong>Two fingers lift the pen</strong><span>Raise your middle finger to move between letters.</span></div>
+        </li>
+      </ol>
+      <p class="tip">Using a projector? Point the webcam at the screen and press <kbd>K</kbd> so the ink lands right under your finger.</p>
+      <button id="welcome-go" class="go">Start</button>
+    </div>
+  </div>
 
   <script src="script.js"></script>
 </body>
