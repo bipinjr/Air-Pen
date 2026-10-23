@@ -32,7 +32,7 @@ You don't need to reach the edges of the camera view: its comfortable middle cov
 
 ## Tidy words
 
-When you finish a word (pen lifted for about a second), Air Pen reads your handwriting and replaces it with clean text in the same place and size.
+When you finish a word, Air Pen reads your handwriting and replaces it with clean text in the same place and size, about 0.7 s after you lift the pen. Reading starts in the background the moment the pen lifts, so the swap is instant. If a slow word gets split in two, pause less between its letters (or press `Z` and rewrite it).
 
 - `Z` turns the word back into your handwriting (and keeps it that way). `Z` again removes strokes as usual.
 - `Enter` reads the word straight away. `R` (or the **Aa** button) turns tidying on or off.

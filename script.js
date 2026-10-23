@@ -31,7 +31,8 @@ const REACH = { x0: 0.15, x1: 0.85, y0: 0.1, y1: 0.75 };
 
 // Word tidying: after the pen has been lifted this long, the word just written is read and
 // replaced by clean text. Uses Google's handwriting recognition (the strokes are sent to Google).
-const TIDY_AFTER_MS = 1300;
+const TIDY_AFTER_MS = 700;   // pen lifted this long = word finished, swap in the text
+const EARLY_READ_MS = 150;   // start reading in the background this soon after the pen lifts
 const HANDWRITING_URL = 'https://inputtools.google.com/request?ime=handwriting&app=mobilesearch&cs=1&oe=UTF-8';
 const TEXT_FONT = '400 {size}px "Bricolage Grotesque", system-ui, sans-serif';
 
@@ -747,15 +748,29 @@ async function readHandwriting(group, w, h, minX, minY) {
   return null;
 }
 
-async function tidyWord(group = wordStrokes()) {
-  if (!group.length) return;
+function bounds(group) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const s of group) for (const p of s) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-  const w = maxX - minX, h = maxY - minY;
+  return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+}
+
+// Speed: the word is sent for reading as soon as the pen lifts, in the background. If no more ink
+// comes, the answer is usually back by the time the word counts as finished, so the swap is instant.
+let earlyRead = null; // { group, promise }
+const sameGroup = (a, b) => a.length === b.length && a.every((s, i) => s === b[i]);
+function startEarlyRead(group) {
+  const b = bounds(group);
+  earlyRead = { group: group.slice(), promise: readHandwriting(group, b.w, b.h, b.minX, b.minY) };
+}
+
+async function tidyWord(group = wordStrokes()) {
+  if (!group.length) return;
+  const { minX, minY, maxY, w, h } = bounds(group);
   if (Math.max(w, h) < 12) { for (const s of group) s.kept = true; return; } // a dot or a tap: leave it
   for (const s of group) s.reading = true;
-  toast('Reading your handwriting');
-  const text = await readHandwriting(group, w, h, minX, minY);
+  const pending = earlyRead && sameGroup(earlyRead.group, group) ? earlyRead.promise : readHandwriting(group, w, h, minX, minY);
+  earlyRead = null;
+  const text = await pending;
   for (const s of group) s.reading = false;
   const still = group.filter((s) => strokes.includes(s)); // undone or cleared while reading: nothing to replace
   if (!still.length) return;
@@ -782,12 +797,19 @@ function setAutoTidy(on) {
   toast(on ? 'Tidy words on: finished words become clean text' : 'Tidy words off: your handwriting stays');
 }
 
-// read the word once the pen has been lifted for a moment
+// Warm up the reader once at start (a single dot, none of your writing): its first answer is slow,
+// so this makes the first real word convert as fast as the rest.
+if (autoTidy) readHandwriting([[{ x: 0, y: 0 }, { x: 1, y: 1 }]], 10, 10, 0, 0);
+
+// read early in the background, then swap in the text once the pen has been lifted for a moment
 setInterval(() => {
   if (!autoTidy || drawing || calib || !lastInkAt) return;
-  if (performance.now() - lastInkAt < TIDY_AFTER_MS) return;
-  if (wordStrokes().length) tidyWord();
-}, 200);
+  const group = wordStrokes();
+  if (!group.length) return;
+  const idle = performance.now() - lastInkAt;
+  if (idle >= EARLY_READ_MS && !(earlyRead && sameGroup(earlyRead.group, group))) startEarlyRead(group);
+  if (idle >= TIDY_AFTER_MS) tidyWord(group);
+}, 50);
 
 // ======================= interface =======================
 
