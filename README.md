@@ -30,13 +30,21 @@ The badge in the top-left corner always shows what the camera thinks your hand i
 
 You don't need to reach the edges of the camera view: its comfortable middle covers the whole screen.
 
+## Tidy words
+
+When you finish a word (pen lifted for about a second), Air Pen reads your handwriting and replaces it with clean text in the same place and size.
+
+- `Z` turns the word back into your handwriting (and keeps it that way). `Z` again removes strokes as usual.
+- `Enter` reads the word straight away. `R` (or the **Aa** button) turns tidying on or off.
+- It uses Google's handwriting recognition, so it needs internet and your strokes are sent to Google. Offline, your handwriting simply stays.
+
 ## Pen mode (write with a real pen)
 
 Press `P` (or the pen button) and hold **any pen**. The hand tracker finds your grip, and the app follows the pen body out from your fingers to its tip, which becomes the pen point.
 
 - **Writing and lifting work like finger mode:** `Shift` or the clicker turns writing on, and raising your middle finger lifts the pen.
 - **Best results:** point the pen tip away from your hand, and use a pen that stands out from what's behind it (a dark pen in front of a white board is ideal).
-- **No pen in view?** The point stays on your fingertip, so it never jumps around. The badge and the live view (`V`) show whether the pen tip was found.
+- **Pen pointing at the camera?** Then the camera can't see the pen body, and its tip is right at your grip, so the point sits between your thumb and index fingertip. The badge and the live view (`V`) show which one is used.
 
 ## Writing on a projector
 
@@ -63,6 +71,8 @@ The ink now lands right under your finger, even with the camera at an angle or a
 | `D` | Diagnostics: hand-model speed, lost-hand count, line breaks by cause |
 | `V` | Big live camera view with your tracked hand drawn on it |
 | `P` | Pen mode on / off (follow the tip of any pen you hold) |
+| `R` | Tidy words on / off (finished words become clean text) |
+| `Enter` | Tidy the current word now |
 
 ## Steady writing
 

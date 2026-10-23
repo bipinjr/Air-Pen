@@ -275,6 +275,7 @@ kbd {
 }
 
 .icon svg .fill { fill: currentColor; }
+.tip + .tip { margin-top: 8px; }
 .icon[aria-pressed="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 .write-toggle {

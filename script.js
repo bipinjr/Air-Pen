@@ -29,6 +29,12 @@ const STRING_LENGTHS = [0.006, 0.010, 0.015, 0.021, 0.028]; // fraction of scree
 // have to push your hand to the frame edge, where part of it leaves the picture and tracking fails.
 const REACH = { x0: 0.15, x1: 0.85, y0: 0.1, y1: 0.75 };
 
+// Word tidying: after the pen has been lifted this long, the word just written is read and
+// replaced by clean text. Uses Google's handwriting recognition (the strokes are sent to Google).
+const TIDY_AFTER_MS = 1300;
+const HANDWRITING_URL = 'https://inputtools.google.com/request?ime=handwriting&app=mobilesearch&cs=1&oe=UTF-8';
+const TEXT_FONT = '400 {size}px "Bricolage Grotesque", system-ui, sans-serif';
+
 // Projector calibration targets, screen-normalized
 const CAL_TARGETS = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
 const CAL_HOLD_MS = 1000;
@@ -57,6 +63,8 @@ let steadiness = Math.min(5, Math.max(1, Number(prefs.get('steadiness', 2)) || 2
 let homography = prefs.get('homography', null);
 let penMode = prefs.get('penMode', false);      // write with a real pen: track its tip instead of the fingertip
 let penSlot = 0;
+let autoTidy = prefs.get('autoTidy', true);
+let lastInkAt = 0; // when ink was last added (for the tidy delay)
 let sizeSlot = 3; // 10px: readable from the back of a room
 
 // ======================= state =======================
@@ -126,6 +134,7 @@ function endStroke() {
   if (currentStroke.length > 2) smoothStroke(currentStroke);
   drawing = false;
   inkDirty = true;
+  lastInkAt = performance.now();
 }
 
 function resetPointer() {
@@ -380,7 +389,7 @@ function penTip(lm) {
       if (!p) break;
       const s1 = px(x + nx * side, y + ny * side), s2 = px(x - nx * side, y - ny * side);
       const sideContrast = Math.min(s1 ? cd(p, s1) : 0, s2 ? cd(p, s2) : 0); // both sides must differ: thin object
-      if (cd(p, body) < 45 && sideContrast > 35) {
+      if (cd(p, body) < 50 && sideContrast > 25) {
         run = r - r0 + 1;
         contrast += sideContrast;
         miss = 0;
@@ -397,7 +406,8 @@ function penTip(lm) {
   penHistory.push(best ? { angle: best.th, len: best.len / scale } : null);
   if (penHistory.length > 5) penHistory.shift();
   const seen = penHistory.filter(Boolean);
-  if (seen.length < 3) { penFound = false; if (!best) penAngle = null; else penAngle = best.th; return lm[8]; }
+  // no pen body visible: the pen is probably pointing at the camera, so its tip is right at the grip
+  if (seen.length < 3) { penFound = false; penAngle = best ? best.th : null; return { x: grip.x / W, y: grip.y / H }; }
   penFound = true;
   const mid = (arr) => arr.slice().sort((a, b) => a - b)[arr.length >> 1];
   const ref = seen[seen.length - 1].angle; // unwrap angles around the latest one before taking the median
@@ -506,9 +516,25 @@ function resizeCanvas() {
   const ow = canvas.width || innerWidth, oh = canvas.height || innerHeight;
   canvas.width = innerWidth;
   canvas.height = innerHeight;
-  for (const s of strokes) for (const p of s) { p.x *= canvas.width / ow; p.y *= canvas.height / oh; }
+  for (const s of strokes) scaleItem(s, canvas.width / ow, canvas.height / oh);
   inkDirty = true;
   resetPointer();
+}
+
+function scaleItem(item, sx, sy) {
+  if (item.kind === 'text') {
+    item.x *= sx; item.y *= sy; item.size *= sy;
+    for (const s of item.src) scaleItem(s, sx, sy);
+  } else for (const p of item) { p.x *= sx; p.y *= sy; }
+}
+
+function drawItem(c, item, theme) {
+  if (item.kind !== 'text') return strokePath(c, item, theme);
+  c.font = TEXT_FONT.replace('{size}', item.size.toFixed(1));
+  c.textBaseline = 'middle';
+  c.fillStyle = c.shadowColor = theme.pens[item.pen];
+  c.shadowBlur = theme.glow;
+  c.fillText(item.text, item.x, item.y);
 }
 
 function strokePath(c, stroke, theme) {
@@ -531,7 +557,7 @@ function drawStrokes(theme) {
   if (inkDirty) {
     ink.width = canvas.width;
     ink.height = canvas.height; // also clears
-    for (const s of strokes) if (!(drawing && s === currentStroke)) strokePath(inkCtx, s, theme);
+    for (const s of strokes) if (!(drawing && s === currentStroke)) drawItem(inkCtx, s, theme);
     inkDirty = false;
   }
   ctx.shadowBlur = 0;
@@ -620,6 +646,7 @@ function render(point) {
     }
     const prev = currentStroke[currentStroke.length - 1];
     if (!prev || Math.hypot(smoothX - prev.x, smoothY - prev.y) >= MIN_STEP_PX) currentStroke.push({ x: smoothX, y: smoothY });
+    lastInkAt = now;
   } else {
     endStroke();
   }
@@ -648,7 +675,14 @@ function setWriting(on) {
   updateStatus(target !== null);
 }
 
-function undo() { endStroke(); if (strokes.pop()) inkDirty = true; }
+// Undo: a tidied word turns back into your handwriting first (kept as handwriting), then strokes go one by one.
+function undo() {
+  endStroke();
+  const last = strokes.pop();
+  if (!last) return;
+  if (last.kind === 'text') for (const s of last.src) { s.kept = true; strokes.push(s); }
+  inkDirty = true;
+}
 function clearBoard() { strokes = []; currentStroke = []; drawing = false; inkDirty = true; toast('Board cleared'); }
 function setPen(slot) { penSlot = slot; syncDock(); }
 function setSize(slot) { sizeSlot = Math.min(PEN_SIZES.length - 1, Math.max(0, slot)); syncDock(); }
@@ -675,7 +709,7 @@ function saveImage() {
   const c = out.getContext('2d');
   c.fillStyle = theme.bg;
   c.fillRect(0, 0, out.width, out.height);
-  for (const s of strokes) strokePath(c, s, theme);
+  for (const s of strokes) drawItem(c, s, theme);
   const a = document.createElement('a');
   const d = new Date(), pad = (n) => String(n).padStart(2, '0');
   a.download = `air-pen-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.png`;
@@ -691,6 +725,70 @@ async function toggleFullscreen() {
   } catch (err) { console.error('Fullscreen failed:', err); }
 }
 
+// ======================= word tidying =======================
+
+// Strokes of the word being written: handwriting not yet read (and not kept as handwriting on purpose).
+const wordStrokes = () => strokes.filter((s) => !s.kind && !s.kept && !s.reading && s.length);
+
+async function readHandwriting(group, w, h, minX, minY) {
+  const ink = group.map((s) => [s.map((p) => Math.round(p.x - minX)), s.map((p) => Math.round(p.y - minY)), s.map((_, i) => i * 16)]);
+  const body = JSON.stringify({ options: 'enable_pre_space', requests: [{ writing_guide: { writing_area_width: Math.round(w), writing_area_height: Math.round(h) }, ink, language: 'en' }] });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 6000);
+    try {
+      const r = await fetch(HANDWRITING_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: stop.signal });
+      const j = await r.json();
+      if (j[0] === 'SUCCESS') return (j[1][0][1][0] || '').trim();
+    } catch (err) {
+      console.warn('Handwriting recognition failed:', err);
+    } finally { clearTimeout(timer); }
+  }
+  return null;
+}
+
+async function tidyWord(group = wordStrokes()) {
+  if (!group.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of group) for (const p of s) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+  const w = maxX - minX, h = maxY - minY;
+  if (Math.max(w, h) < 12) { for (const s of group) s.kept = true; return; } // a dot or a tap: leave it
+  for (const s of group) s.reading = true;
+  toast('Reading your handwriting');
+  const text = await readHandwriting(group, w, h, minX, minY);
+  for (const s of group) s.reading = false;
+  const still = group.filter((s) => strokes.includes(s)); // undone or cleared while reading: nothing to replace
+  if (!still.length) return;
+  if (!text) {
+    for (const s of still) s.kept = true;
+    toast(navigator.onLine ? "Couldn't read that word, kept your handwriting" : 'Offline: kept your handwriting');
+    return;
+  }
+  // size the text to sit where the word was: as wide as the handwriting, within sensible height limits
+  const sizeAt100 = (ctx.font = TEXT_FONT.replace('{size}', '100'), ctx.measureText(text).width);
+  const size = Math.min(h * 2.2, Math.max(h * 0.9, 100 * w / Math.max(1, sizeAt100)));
+  const item = { kind: 'text', text, pen: still[0].pen, size, x: minX, y: (minY + maxY) / 2, src: still };
+  const at = strokes.indexOf(still[0]);
+  strokes = strokes.filter((s) => !still.includes(s));
+  strokes.splice(Math.min(at, strokes.length), 0, item);
+  inkDirty = true;
+  toast(`“${text}”  (Z brings back your handwriting)`);
+}
+
+function setAutoTidy(on) {
+  autoTidy = on;
+  prefs.set('autoTidy', on);
+  ui.tidyBtn.setAttribute('aria-pressed', on);
+  toast(on ? 'Tidy words on: finished words become clean text' : 'Tidy words off: your handwriting stays');
+}
+
+// read the word once the pen has been lifted for a moment
+setInterval(() => {
+  if (!autoTidy || drawing || calib || !lastInkAt) return;
+  if (performance.now() - lastInkAt < TIDY_AFTER_MS) return;
+  if (wordStrokes().length) tidyWord();
+}, 200);
+
 // ======================= interface =======================
 
 const $ = (id) => document.getElementById(id);
@@ -698,7 +796,7 @@ const ui = {
   status: $('status'), title: $('status-title'), detail: $('status-detail'), diag: $('diag'),
   writeBtn: $('btn-write'), writeLabel: $('btn-write-label'), sizeDot: $('size-dot'),
   toast: $('toast'), calib: $('calib'), calibText: $('calib-text'), calibStep: $('calib-step'),
-  welcome: $('welcome'), penBtn: $('btn-pen')
+  welcome: $('welcome'), penBtn: $('btn-pen'), tidyBtn: $('btn-tidy')
 };
 
 function setStatus(state, title, detail) {
@@ -712,7 +810,7 @@ function updateStatus(handSeen) {
   if (mode === 'mouse') return setStatus('mouse', 'Mouse mode', 'No camera found. Hold the mouse button to draw.');
   if (mode !== 'camera') return;
   if (penMode) {
-    const where = penFound ? 'pen tip found' : 'no pen seen, using your fingertip';
+    const where = penFound ? 'pen tip found' : 'pen point at your grip';
     if (!handSeen) return setStatus('nohand', 'No hand', 'Hold the pen up where the camera can see your hand');
     if (!writingOn) return setStatus('pen-off', 'Writing is off', `Press Shift (or Page Down) to start · ${where}`);
     if (penGesture) return setStatus('pen-writing', 'Writing with the pen', `Raise your middle finger to lift · ${where}`);
@@ -755,7 +853,8 @@ function updateDiag() {
     ['Lines broken by lost hand', stats.lostLifts],
     ['Steadiness', `${steadiness} of 5`],
     ['Projector', homography ? 'calibrated' : 'not calibrated'],
-    ['Tracking', penMode ? (penFound ? 'pen tip' : 'pen not found: fingertip') : 'index finger']
+    ['Tracking', penMode ? (penFound ? 'pen tip' : 'pen at the grip') : 'index finger'],
+    ['Tidy words', autoTidy ? 'on' : 'off']
   ];
   ui.diag.innerHTML = '<dl style="display:contents">' + rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('') + '</dl>';
 }
@@ -779,6 +878,7 @@ click('btn-calib', startCalibration);
 click('btn-full', toggleFullscreen);
 click('btn-help', () => showWelcome(true));
 click('btn-pen', () => setPenMode(!penMode));
+click('btn-tidy', () => setAutoTidy(!autoTidy));
 click('welcome-go', () => showWelcome(false));
 document.querySelectorAll('.swatch').forEach((b) => b.addEventListener('click', () => { setPen(Number(b.dataset.pen)); b.blur(); }));
 
@@ -810,6 +910,8 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'd') { ui.diag.classList.toggle('hidden'); updateDiag(); }
   else if (key === 'k') startCalibration();
   else if (key === 'p') setPenMode(!penMode);
+  else if (key === 'r') setAutoTidy(!autoTidy);
+  else if (key === 'enter') tidyWord(); // read the word now
   else if (key === 'v') camBox.classList.toggle('big'); // big live camera view with the tracked hand
   else if (key === 'escape') {
     if (calib) stopCalibration();
@@ -863,5 +965,6 @@ camBox.classList.toggle('mirror', !homography);
 resizeCanvas();
 syncDock();
 ui.penBtn.setAttribute('aria-pressed', penMode);
+ui.tidyBtn.setAttribute('aria-pressed', autoTidy);
 if (!prefs.get('welcomed', false)) showWelcome(true);
 start();
