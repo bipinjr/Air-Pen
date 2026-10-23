@@ -16,7 +16,6 @@ const PEN_SIZES = [3, 5, 7, 10, 14];
 // Line continuity
 const LOST_GRACE_MS = 200;          // hand may vanish this long without resetting the cursor
 const LOST_GRACE_WRITING_MS = 600;  // ...and this long while writing (0.3 s webcam dropout + time to re-find the hand)
-const LOST_GRACE_PEN_MS = 300;      // pen mode: hiding the cap is how you lift the pen, so react faster
 const PEN_DOWN_FRAMES = 3;          // pose must hold this many results to start writing
 const PEN_UP_FRAMES = 5;            // ...and this many to stop, so a wobbly reading never breaks a letter
 const MAX_JUMP = 0.2;               // fingertip jump (fraction of camera frame) in one result = misdetection
@@ -56,11 +55,7 @@ let themeName = new URLSearchParams(location.search).get('theme') || prefs.get('
 if (!THEMES[themeName]) themeName = 'light';
 let steadiness = Math.min(5, Math.max(1, Number(prefs.get('steadiness', 2)) || 2));
 let homography = prefs.get('homography', null);
-let penMode = prefs.get('penMode', false);      // track a coloured pen cap instead of the index finger
-// Cap colour { h: hue°, hTol: ±hue°, sMin, vMin }. Default: a blue cap. L re-learns it from your actual pen.
-// A cap is bright and saturated; dark navy clothing is not, hence the brightness floor.
-const BLUE_PEN = { h: 215, hTol: 25, sMin: 0.5, vMin: 0.45 };
-let penColor = prefs.get('penColor', BLUE_PEN);
+let penMode = prefs.get('penMode', false);      // write with a real pen: track its tip instead of the fingertip
 let penSlot = 0;
 let sizeSlot = 3; // 10px: readable from the back of a room
 
@@ -256,9 +251,11 @@ function updatePen(lm) {
   if (mid > 1.2) middleUp = true;
   else if (mid < 1.05) middleUp = false;
   const idx = stretch(lm, 8, 6);
-  const wantDown = penGesture
-    ? !middleUp && idx > 0.9   // writing: continue unless a second finger is clearly up or the index curls
-    : !middleUp && idx > 1.1;  // not writing: start only on a clearly raised index
+  const wantDown = penMode
+    ? !middleUp                // holding a pen bends the index, so only the middle finger decides
+    : penGesture
+      ? !middleUp && idx > 0.9 // writing: continue unless a second finger is clearly up or the index curls
+      : !middleUp && idx > 1.1; // not writing: start only on a clearly raised index
   if (wantDown === penGesture) { penVotes = 0; liftMark = null; return; }
   if (penVotes === 0 && penGesture && drawing) {
     liftMark = currentStroke.length;
@@ -282,12 +279,12 @@ function updatePen(lm) {
 let jumpSkips = 0, lastTip = null, lastTipAt = 0;
 
 function onResults(results) {
-  if (penMode) return; // pen mode does its own detection
   const lm = results.multiHandLandmarks && results.multiHandLandmarks[0];
-  onTip(lm ? lm[8] : null, lm || null); // index fingertip only
+  if (!lm) return onTip(null, null);
+  onTip(penMode ? penTip(lm) : lm[8], lm); // pen tip, or the index fingertip
 }
 
-// One tracked point per camera frame, from the finger (with its hand landmarks) or the pen cap.
+// One tracked point per camera frame (fingertip or pen tip), with the hand landmarks.
 function onTip(raw, lm) {
   const t = performance.now();
   stats.results.push(t);
@@ -319,196 +316,108 @@ function onTip(raw, lm) {
   lastTipAt = t;
 
   if (calib) { target = null; drawSkeleton(lm, lastTip); calibrationStep(lastTip, t); return; }
-  if (lm) updatePen(lm);
-  else penGesture = true; // pen mode: the cap is visible, so the pen can write
+  updatePen(lm);
   updateStatus(true);
   drawSkeleton(lm, lastTip);
   target = toScreen(lastTip);
 }
 
-// ======================= pen tracking (coloured cap) =======================
+// ======================= pen tracking (any pen) =======================
+// The hand model finds the grip: between thumb tip and index tip when you hold a pen (else the index tip).
+// From there we look along every direction pointing away from the palm for the pen body: a thin, straight
+// run of similar pixels that both of its sides contrast with. Where that run ends is the pen tip.
+// Works for any pen colour, as long as it stands out from what's behind it. No pen found = fingertip.
 
-// The camera frame is scaled down to this width for colour search: plenty for a cap, and fast.
-const PEN_W = 480;
-const penCanvas = document.createElement('canvas');
-const penCtx = penCanvas.getContext('2d', { willReadFrequently: true });
-let penMask = null, penSeen = null; // reused buffers
-const PEN_MIN_PIXELS = 10;          // smaller blobs are noise
-const PEN_MAX_SHARE = 0.02;         // bigger than 2% of the frame = clothing or a wall, not a pen cap
-let teaching = false;               // colour-teach screen is open
+const ROI = 160;      // the area around the grip is sampled into a ROI x ROI square
+const roiCanvas = document.createElement('canvas');
+roiCanvas.width = roiCanvas.height = ROI;
+const roiCtx = roiCanvas.getContext('2d', { willReadFrequently: true });
+let frameEl = null;   // the video/image the hand model is looking at
+let penAngle = null;  // last pen direction (radians), keeps the choice steady between frames
+let penFound = false;
+let penHistory = [];  // last 5 frames: { angle, len } or null, for a steady pen tip
 
-// RGB (0-255) -> [hue 0-360, saturation 0-1, value 0-1]
-function hsv(r, g, b) {
-  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
-  let h = 0;
-  if (d) {
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  return [h, max ? d / max : 0, max / 255];
-}
-const hueGap = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
-
-function grabFrame(el) {
-  const w = el.videoWidth || el.naturalWidth || el.width, h = el.videoHeight || el.naturalHeight || el.height;
-  if (!w || !h) return null;
-  const pw = PEN_W, ph = Math.round(PEN_W * h / w);
-  if (penCanvas.width !== pw || penCanvas.height !== ph) { penCanvas.width = pw; penCanvas.height = ph; }
-  penCtx.drawImage(el, 0, 0, pw, ph);
-  return penCtx.getImageData(0, 0, pw, ph);
-}
-
-// All cap-sized patches of the learned colour, each with its centre (camera-normalized,
-// sub-pixel: the average of its pixels).
-function findBlobs(img, color) {
-  const { width: w, height: h, data } = img;
-  const n = w * h;
-  if (!penMask || penMask.length !== n) { penMask = new Uint8Array(n); penSeen = new Int32Array(n); }
-  for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const [hh, ss, vv] = hsv(data[j], data[j + 1], data[j + 2]);
-    penMask[i] = ss >= color.sMin && vv >= color.vMin && hueGap(hh, color.h) <= color.hTol ? 1 : 0;
-  }
-  const blobs = [];
-  const maxPixels = n * PEN_MAX_SHARE;
-  const stack = penSeen; // reuse as an explicit stack for flood fill
-  for (let i = 0; i < n; i++) {
-    if (penMask[i] !== 1) continue;
-    let top = 0, count = 0, sx = 0, sy = 0;
-    stack[top++] = i;
-    penMask[i] = 2;
-    while (top) {
-      const k = stack[--top], x = k % w, y = (k - x) / w;
-      count++; sx += x; sy += y;
-      if (x > 0 && penMask[k - 1] === 1) { penMask[k - 1] = 2; stack[top++] = k - 1; }
-      if (x < w - 1 && penMask[k + 1] === 1) { penMask[k + 1] = 2; stack[top++] = k + 1; }
-      if (y > 0 && penMask[k - w] === 1) { penMask[k - w] = 2; stack[top++] = k - w; }
-      if (y < h - 1 && penMask[k + w] === 1) { penMask[k + w] = 2; stack[top++] = k + w; }
-    }
-    if (count < PEN_MIN_PIXELS || count > maxPixels) continue;
-    blobs.push({ x: (sx / count + 0.5) / w, y: (sy / count + 0.5) / h, size: count });
-  }
-  return blobs;
-}
-
-// Pick the pen among the patches. Following the pen: only a patch close to where it just was, so it
-// never jumps to another blue thing. Finding it: anything that has sat perfectly still for a while
-// (a blue poster, a sticker, a bag) is part of the room and ignored; a hand-held pen is never that still.
-const PEN_FOLLOW_RADIUS = 0.15; // fraction of the frame per result
-const STILL_RADIUS = 0.004;     // a patch staying within this counts as not moving
-const STILL_MS = 1500;          // still this long = part of the room
-let stillSpots = [];            // { x, y, since, frame }
-let penFrame = 0;
-
-function findPen(img, color, near) {
-  const now = performance.now();
-  const blobs = findBlobs(img, color);
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-  penFrame++;
-  stillSpots = stillSpots.filter((sp) => penFrame - sp.frame <= 3); // forget a spot missing for 3 frames, however slow the frames
-  for (const b of blobs) {
-    let sp = stillSpots.find((q) => dist(b, q) < STILL_RADIUS);
-    if (!sp) stillSpots.push(sp = { x: b.x, y: b.y, since: now, frame: penFrame });
-    sp.frame = penFrame;
-    b.age = now - sp.since; // how long this patch has stayed put
-  }
-  let pick = null;
-  if (near) {
-    for (const b of blobs) if (dist(b, near) < PEN_FOLLOW_RADIUS && (!pick || dist(b, near) < dist(pick, near))) pick = b;
-  } else {
-    for (const b of blobs) if (b.age < STILL_MS && (!pick || b.age < pick.age)) pick = b; // the most recently moved
-  }
-  return pick;
-}
-
-// Learn the cap colour from the centre box of the camera view.
-const TEACH_BOX = 0.12; // box size as a fraction of the frame width
-function learnPenColor(img) {
-  const { width: w, height: h, data } = img;
-  const half = Math.round(w * TEACH_BOX / 2), cx = w >> 1, cy = h >> 1;
-  const px = [];
-  for (let y = cy - half; y < cy + half; y++) for (let x = cx - half; x < cx + half; x++) {
-    const j = (y * w + x) * 4;
-    const c = hsv(data[j], data[j + 1], data[j + 2]);
-    if (c[1] > 0.3 && c[2] > 0.2) px.push(c); // colourful pixels only
-  }
-  const total = 4 * half * half;
-  if (px.length < total * 0.25) return { error: 'Not enough colour in the box. Hold the cap closer so it fills the box.' };
-  // circular median hue: average the unit vectors, then use the gaps around it
-  const ang = Math.atan2(px.reduce((a, c) => a + Math.sin(c[0] * Math.PI / 180), 0), px.reduce((a, c) => a + Math.cos(c[0] * Math.PI / 180), 0));
-  const h0 = (ang * 180 / Math.PI + 360) % 360;
-  const gaps = px.map((c) => hueGap(c[0], h0)).sort((a, b) => a - b);
-  const sat = px.map((c) => c[1]).sort((a, b) => a - b), val = px.map((c) => c[2]).sort((a, b) => a - b);
-  const color = {
-    h: Math.round(h0),
-    hTol: Math.round(Math.min(22, Math.max(10, gaps[Math.floor(gaps.length * 0.9)] * 1.5))),
-    sMin: +Math.max(0.3, sat[Math.floor(sat.length * 0.1)] * 0.7).toFixed(2),
-    vMin: +Math.max(0.2, val[Math.floor(val.length * 0.1)] * 0.6).toFixed(2)
+function penTip(lm) {
+  const el = frameEl;
+  const W = el && (el.videoWidth || el.naturalWidth || el.width), H = el && (el.videoHeight || el.naturalHeight || el.height);
+  if (!W || !H) { penFound = false; return lm[8]; }
+  const P = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const thumb = P(4), index = P(8), palm = P(9);
+  const handSize = d2(P(0), palm); // wrist to middle knuckle, in camera px
+  const pinch = d2(thumb, index) < handSize * 0.6;
+  const grip = pinch ? { x: (thumb.x + index.x) / 2, y: (thumb.y + index.y) / 2 } : index;
+  const R = handSize * 1.4;        // a pen sticks out at most about this far from the grip
+  const scale = ROI / (2 * R);
+  roiCtx.fillStyle = '#808080';    // outside the camera frame: neutral, no edges
+  roiCtx.fillRect(0, 0, ROI, ROI);
+  roiCtx.drawImage(el, grip.x - R, grip.y - R, 2 * R, 2 * R, 0, 0, ROI, ROI);
+  const data = roiCtx.getImageData(0, 0, ROI, ROI).data;
+  const px = (x, y) => {
+    const xi = Math.round(x), yi = Math.round(y);
+    if (xi < 0 || yi < 0 || xi >= ROI || yi >= ROI) return null;
+    const j = (yi * ROI + xi) * 4;
+    return [data[j], data[j + 1], data[j + 2]];
   };
-  const skinLike = color.h < 45 || color.h > 340;
-  return { color, skinLike };
-}
+  const cd = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const gap = (a, b) => { const g = Math.abs(a - b) % (2 * Math.PI); return g > Math.PI ? 2 * Math.PI - g : g; };
 
-// Ink hues by slot (0 blue, 2 red, 3 green, 4 amber); slot 1 is neutral (black/white), which a pen colour never matches.
-const INK_HUES = [222, null, 4, 140, 33];
-function inkClashesWithPen(slot) {
-  return penMode && penColor && INK_HUES[slot] !== null && hueGap(INK_HUES[slot], penColor.h) < penColor.hTol + 20;
+  const c = ROI / 2;
+  const palmAng = Math.atan2(palm.y - grip.y, palm.x - grip.x);
+  const r0 = (pinch ? d2(thumb, index) / 2 : handSize * 0.06) * scale + 2; // start just past the fingertips
+  const side = Math.max(4, handSize * scale * 0.09);                         // a pen is thinner than 2x this
+  let best = null;
+  for (let a = 0; a < 360; a += 3) {
+    const th = a * Math.PI / 180;
+    if (gap(th, palmAng) < 1.75) continue; // within ~100° of the palm: that's the hand, not the pen tip
+    const ux = Math.cos(th), uy = Math.sin(th), nx = -uy, ny = ux;
+    let body = px(c + ux * r0, c + uy * r0);
+    if (!body) continue;
+    body = body.slice();
+    let run = 0, contrast = 0, miss = 0;
+    for (let r = r0; r < ROI / 2 - 1; r++) {
+      const x = c + ux * r, y = c + uy * r, p = px(x, y);
+      if (!p) break;
+      const s1 = px(x + nx * side, y + ny * side), s2 = px(x - nx * side, y - ny * side);
+      const sideContrast = Math.min(s1 ? cd(p, s1) : 0, s2 ? cd(p, s2) : 0); // both sides must differ: thin object
+      if (cd(p, body) < 45 && sideContrast > 35) {
+        run = r - r0 + 1;
+        contrast += sideContrast;
+        miss = 0;
+        for (let k = 0; k < 3; k++) body[k] = body[k] * 0.85 + p[k] * 0.15; // follow slow shading changes
+      } else if (++miss > 2) break;
+    }
+    if (run < ROI * 0.08) continue; // too short to be a pen
+    let score = run * (contrast / run);
+    if (penAngle !== null && gap(th, penAngle) < 0.35) score *= 1.5; // prefer the direction it had last frame
+    if (!best || score > best.score) best = { score, th, len: r0 + run };
+  }
+  // Consistency: one frame can mislead (an edge in the background, motion blur). Use the pen only when it
+  // was seen in at least 3 of the last 5 frames, at its median direction and length; otherwise the fingertip.
+  penHistory.push(best ? { angle: best.th, len: best.len / scale } : null);
+  if (penHistory.length > 5) penHistory.shift();
+  const seen = penHistory.filter(Boolean);
+  if (seen.length < 3) { penFound = false; if (!best) penAngle = null; else penAngle = best.th; return lm[8]; }
+  penFound = true;
+  const mid = (arr) => arr.slice().sort((a, b) => a - b)[arr.length >> 1];
+  const ref = seen[seen.length - 1].angle; // unwrap angles around the latest one before taking the median
+  const angle = mid(seen.map((h) => ref + Math.atan2(Math.sin(h.angle - ref), Math.cos(h.angle - ref))));
+  const len = mid(seen.map((h) => h.len));
+  penAngle = angle;
+  return { x: (grip.x + Math.cos(angle) * len) / W, y: (grip.y + Math.sin(angle) * len) / H };
 }
 
 function setPenMode(on) {
   penMode = on;
-  syncDock();
-  if (on && inkClashesWithPen(penSlot)) {
-    penSlot = 1;
-    syncDock();
-    toast('Ink set to black: the camera must not confuse projected ink with your pen');
-  }
   prefs.set('penMode', on);
   penGesture = false;
+  penAngle = null;
+  penHistory = [];
   resetPointer();
   drawSkeleton(null);
   ui.penBtn.setAttribute('aria-pressed', on);
-  document.body.classList.toggle('pen-mode', on);
-  if (on && !penColor) startTeaching();
-  else if (!on || !ui.toast.classList.contains('show')) toast(on ? 'Pen mode: the pen writes while its cap is visible' : 'Finger mode');
+  toast(on ? 'Pen mode: hold any pen, its tip is the pen point' : 'Finger mode');
   updateStatus(false);
-}
-
-function startTeaching() {
-  if (mode !== 'camera') { toast('Pen mode needs the camera'); return; }
-  teaching = true;
-  camBox.classList.add('big', 'teaching');
-  ui.teach.classList.remove('hidden');
-  ui.teachMsg.textContent = 'Hold the coloured cap inside the box, then press Enter';
-}
-
-function stopTeaching() {
-  teaching = false;
-  camBox.classList.remove('big', 'teaching');
-  ui.teach.classList.add('hidden');
-}
-
-function captureTeach() {
-  const img = grabFrame(video);
-  if (!img) return;
-  const r = learnPenColor(img);
-  if (r.error) { ui.teachMsg.textContent = r.error; return; }
-  penColor = r.color;
-  prefs.set('penColor', penColor);
-  stopTeaching();
-  if (!penMode) setPenMode(true);
-  toast(r.skinLike ? 'Learned. This colour is close to skin: a blue, green or pink cap tracks better' : 'Learned your pen colour');
-}
-
-function detectPen(el) {
-  const img = grabFrame(el);
-  if (!img) return;
-  if (teaching) { drawTeachBox(); return; }
-  const near = lastTip && performance.now() - lastTipAt < 300 ? lastTip : null;
-  const p = penColor && findPen(img, penColor, near);
-  onTip(p ? { x: p.x, y: p.y } : null, null);
 }
 
 const hands = new Hands({
@@ -535,8 +444,8 @@ function track(el) {
         const w = el.videoWidth || el.naturalWidth, h = el.videoHeight || el.naturalHeight;
         if (w && h && camAspect !== w / h) { camAspect = w / h; camBox.style.aspectRatio = `${w} / ${h}`; }
         const t0 = performance.now();
-        if (penMode || teaching) detectPen(el);
-        else await hands.send({ image: el });
+        frameEl = el;
+        await hands.send({ image: el });
         stats.sendMs = stats.sendMs * 0.9 + (performance.now() - t0) * 0.1;
       }
     } catch (err) {
@@ -567,12 +476,6 @@ function drawSkeleton(lm, tip) {
   if (skel.width !== w * devicePixelRatio) { skel.width = w * devicePixelRatio; skel.height = h * devicePixelRatio; }
   const c = skelCtx, k = devicePixelRatio;
   c.clearRect(0, 0, skel.width, skel.height);
-  if (!lm && tip) { // pen mode: ring around the tracked cap
-    c.lineWidth = 3 * k;
-    c.strokeStyle = penGesture && writingOn ? '#d93025' : '#12a150'; // not blue: it can be projected
-    c.beginPath(); c.arc(tip.x * skel.width, tip.y * skel.height, 10 * k, 0, Math.PI * 2); c.stroke();
-    return;
-  }
   if (!lm) return;
   const color = penGesture && writingOn ? '#1a4fd6' : '#12a150';
   c.lineWidth = 2.5 * k;
@@ -582,19 +485,14 @@ function drawSkeleton(lm, tip) {
   c.stroke();
   c.fillStyle = '#ffffff';
   for (const p of lm) { c.beginPath(); c.arc(p.x * skel.width, p.y * skel.height, 2.5 * k, 0, Math.PI * 2); c.fill(); }
+  const pt = tip || lm[8];
+  if (penMode && penFound) { // the pen, from the grip to its tip
+    c.lineWidth = 4 * k;
+    c.beginPath(); c.moveTo((lm[4].x + lm[8].x) / 2 * skel.width, (lm[4].y + lm[8].y) / 2 * skel.height);
+    c.lineTo(pt.x * skel.width, pt.y * skel.height); c.stroke();
+  }
   c.fillStyle = color; // the pen point
-  c.beginPath(); c.arc(lm[8].x * skel.width, lm[8].y * skel.height, 6 * k, 0, Math.PI * 2); c.fill();
-}
-
-function drawTeachBox() {
-  const w = skel.clientWidth, h = skel.clientHeight;
-  if (!w) return;
-  if (skel.width !== w * devicePixelRatio) { skel.width = w * devicePixelRatio; skel.height = h * devicePixelRatio; }
-  const side = skel.width * TEACH_BOX;
-  skelCtx.clearRect(0, 0, skel.width, skel.height);
-  skelCtx.lineWidth = 3 * devicePixelRatio;
-  skelCtx.strokeStyle = '#ffffff';
-  skelCtx.strokeRect((skel.width - side) / 2, (skel.height - side) / 2, side, side);
+  c.beginPath(); c.arc(pt.x * skel.width, pt.y * skel.height, 6 * k, 0, Math.PI * 2); c.fill();
 }
 
 // ======================= drawing =======================
@@ -656,7 +554,7 @@ function drawCursor(theme) {
 function drawCalibTarget(theme) {
   const [sx, sy] = CAL_TARGETS[calib.i];
   const x = sx * canvas.width, y = sy * canvas.height, r = Math.max(26, canvas.width * 0.018);
-  ctx.strokeStyle = theme.pens[penMode ? 1 : 0]; // never pen-coloured: the camera is looking at it
+  ctx.strokeStyle = theme.pens[0];
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -683,17 +581,11 @@ function render(point) {
   if (calib) { drawCalibTarget(theme); return; }
 
   if (!point) {
-    const grace = !drawing ? LOST_GRACE_MS : penMode ? LOST_GRACE_PEN_MS : LOST_GRACE_WRITING_MS;
+    const grace = drawing ? LOST_GRACE_WRITING_MS : LOST_GRACE_MS;
     if (smoothX !== null && now - lastSeen < grace) {
       drawCursor(theme); // brief dropout: hold the pen, keep the line going
     } else if (smoothX !== null) {
-      if (drawing && penMode) {
-        // pen mode: hiding the cap is the intended lift. End the letter where the cap was last seen,
-        // not where the trailing pen had got to.
-        stats.gestureLifts++;
-        const prev = currentStroke[currentStroke.length - 1];
-        if (fingerX !== null && (!prev || Math.hypot(fingerX - prev.x, fingerY - prev.y) >= MIN_STEP_PX)) currentStroke.push({ x: fingerX, y: fingerY });
-      } else if (drawing) stats.lostLifts++;
+      if (drawing) stats.lostLifts++;
       penGesture = false;
       penVotes = 0;
       resetPointer();
@@ -758,11 +650,7 @@ function setWriting(on) {
 
 function undo() { endStroke(); if (strokes.pop()) inkDirty = true; }
 function clearBoard() { strokes = []; currentStroke = []; drawing = false; inkDirty = true; toast('Board cleared'); }
-function setPen(slot) {
-  penSlot = slot;
-  syncDock();
-  if (inkClashesWithPen(slot) && homography) toast('Careful: this ink is close to your pen colour, the camera may mistake it for the pen');
-}
+function setPen(slot) { penSlot = slot; syncDock(); }
 function setSize(slot) { sizeSlot = Math.min(PEN_SIZES.length - 1, Math.max(0, slot)); syncDock(); }
 
 function setSteadiness(level) {
@@ -810,7 +698,7 @@ const ui = {
   status: $('status'), title: $('status-title'), detail: $('status-detail'), diag: $('diag'),
   writeBtn: $('btn-write'), writeLabel: $('btn-write-label'), sizeDot: $('size-dot'),
   toast: $('toast'), calib: $('calib'), calibText: $('calib-text'), calibStep: $('calib-step'),
-  welcome: $('welcome'), penBtn: $('btn-pen'), teach: $('teach'), teachMsg: $('teach-msg')
+  welcome: $('welcome'), penBtn: $('btn-pen')
 };
 
 function setStatus(state, title, detail) {
@@ -824,10 +712,11 @@ function updateStatus(handSeen) {
   if (mode === 'mouse') return setStatus('mouse', 'Mouse mode', 'No camera found. Hold the mouse button to draw.');
   if (mode !== 'camera') return;
   if (penMode) {
-    if (teaching) return setStatus('calib', 'Teach the pen', 'Hold the cap in the box and press Enter');
-    if (!handSeen) return setStatus('nohand', 'No pen', 'Show the coloured cap to the camera');
-    if (!writingOn) return setStatus('pen-off', 'Pen found, writing is off', 'Press Shift (or Page Down) to start');
-    return setStatus('pen-writing', 'Writing with the pen', 'Hide or turn the cap, or press Shift, to lift');
+    const where = penFound ? 'pen tip found' : 'no pen seen, using your fingertip';
+    if (!handSeen) return setStatus('nohand', 'No hand', 'Hold the pen up where the camera can see your hand');
+    if (!writingOn) return setStatus('pen-off', 'Writing is off', `Press Shift (or Page Down) to start · ${where}`);
+    if (penGesture) return setStatus('pen-writing', 'Writing with the pen', `Raise your middle finger to lift · ${where}`);
+    return setStatus('pen-off', 'Pen lifted', `Curl your middle finger to write · ${where}`);
   }
   if (!handSeen) return setStatus('nohand', 'No hand', 'Hold one hand up where the camera can see it');
   if (!writingOn) return setStatus('off', 'Writing is off', 'Press Shift (or Page Down) to start');
@@ -849,7 +738,6 @@ function syncDock() {
     const i = Number(b.dataset.pen);
     b.style.setProperty('--c', pens[i]);
     b.setAttribute('aria-checked', i === penSlot);
-    b.classList.toggle('clash', inkClashesWithPen(i)); // faded so the camera can't take it for the pen
   });
   const px = PEN_SIZES[sizeSlot];
   ui.sizeDot.style.setProperty('--s', px + 'px');
@@ -867,7 +755,7 @@ function updateDiag() {
     ['Lines broken by lost hand', stats.lostLifts],
     ['Steadiness', `${steadiness} of 5`],
     ['Projector', homography ? 'calibrated' : 'not calibrated'],
-    ['Tracking', penMode ? (penColor ? `pen cap (hue ${penColor.h}°)` : 'pen, colour not learned') : 'index finger']
+    ['Tracking', penMode ? (penFound ? 'pen tip' : 'pen not found: fingertip') : 'index finger']
   ];
   ui.diag.innerHTML = '<dl style="display:contents">' + rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('') + '</dl>';
 }
@@ -891,8 +779,6 @@ click('btn-calib', startCalibration);
 click('btn-full', toggleFullscreen);
 click('btn-help', () => showWelcome(true));
 click('btn-pen', () => setPenMode(!penMode));
-click('teach-go', captureTeach);
-click('teach-cancel', () => { stopTeaching(); if (!penColor) setPenMode(false); });
 click('welcome-go', () => showWelcome(false));
 document.querySelectorAll('.swatch').forEach((b) => b.addEventListener('click', () => { setPen(Number(b.dataset.pen)); b.blur(); }));
 
@@ -900,11 +786,6 @@ window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   if (!ui.welcome.classList.contains('hidden')) {
     if (key === 'enter' || key === 'escape') { e.preventDefault(); showWelcome(false); }
-    return;
-  }
-  if (teaching) {
-    if (key === 'enter') { e.preventDefault(); captureTeach(); }
-    else if (key === 'escape') { stopTeaching(); if (!penColor) setPenMode(false); }
     return;
   }
   // writing on/off: Shift, or a presentation clicker (Page Down / Page Up) when you're at the wall
@@ -929,7 +810,6 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'd') { ui.diag.classList.toggle('hidden'); updateDiag(); }
   else if (key === 'k') startCalibration();
   else if (key === 'p') setPenMode(!penMode);
-  else if (key === 'l') startTeaching(); // learn (re-teach) the pen colour
   else if (key === 'v') camBox.classList.toggle('big'); // big live camera view with the tracked hand
   else if (key === 'escape') {
     if (calib) stopCalibration();
@@ -982,9 +862,6 @@ document.documentElement.dataset.theme = themeName;
 camBox.classList.toggle('mirror', !homography);
 resizeCanvas();
 syncDock();
-if (inkClashesWithPen(penSlot)) penSlot = 1; // restored pen mode: start with ink the camera can't confuse
-syncDock();
 ui.penBtn.setAttribute('aria-pressed', penMode);
-document.body.classList.toggle('pen-mode', penMode);
 if (!prefs.get('welcomed', false)) showWelcome(true);
 start();

@@ -65,7 +65,7 @@
 
     <div class="dock-group">
       <button id="btn-theme" class="icon" title="White / black board (T)" aria-label="Switch board colour"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg></button>
-      <button id="btn-pen" class="icon" aria-pressed="false" title="Track a coloured pen instead of your finger (P)" aria-label="Pen mode"><svg viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L9 19H5v-4z"/><path d="M13 7l4 4"/></svg></button>
+      <button id="btn-pen" class="icon" aria-pressed="false" title="Write with a real pen (P)" aria-label="Pen mode"><svg viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L9 19H5v-4z"/><path d="M13 7l4 4"/></svg></button>
       <button id="btn-calib" class="icon" title="Calibrate to projector (K)" aria-label="Calibrate to projector"><svg viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.5"/></svg></button>
       <button id="btn-full" class="icon" title="Fullscreen (F)" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
       <button id="btn-help" class="icon" title="How it works" aria-label="How it works"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14M12 17.5v.01"/></svg></button>
@@ -78,16 +78,6 @@
   <div id="calib" class="calib hidden" role="dialog" aria-label="Projector calibration">
     <p id="calib-text">Touch the ring with your fingertip and hold still</p>
     <p class="calib-sub"><span id="calib-step">1</span> of 4 · <kbd>Esc</kbd> cancels</p>
-  </div>
-
-  <!-- pen mode: learn the cap colour -->
-  <div id="teach" class="teach hidden" role="dialog" aria-labelledby="teach-title">
-    <h2 id="teach-title">Show me your pen</h2>
-    <p id="teach-msg">Hold the coloured cap inside the box, then press Enter</p>
-    <div class="teach-actions">
-      <button id="teach-go" class="go">Use this colour</button>
-      <button id="teach-cancel" class="ghost">Cancel</button>
-    </div>
   </div>
 
   <!-- first-run guide -->
@@ -109,7 +99,7 @@
           <div><strong>Two fingers lift the pen</strong><span>Raise your middle finger to move between letters.</span></div>
         </li>
       </ol>
-      <p class="tip">Rather use a pen? Press <kbd>P</kbd> and show it a pen with a brightly coloured cap: blue, green or pink work best.</p>
+      <p class="tip">Rather hold a real pen? Press <kbd>P</kbd>. Any pen works if it stands out from the background behind it.</p>
       <p class="tip">Using a projector? Point the webcam at the screen and press <kbd>K</kbd> so the ink lands right under your finger.</p>
       <button id="welcome-go" class="go">Start</button>
     </div>
